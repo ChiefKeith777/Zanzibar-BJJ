@@ -1,0 +1,19 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  background: #f4f1ea;
+  font-family: 'Archivo', sans-serif;
+  color: #22211d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+@keyframes zbj-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}

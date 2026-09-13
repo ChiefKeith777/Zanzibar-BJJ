@@ -1,0 +1,8 @@
+node_modules/
+dist/
+web/dist/
+.expo/
+*.local
+.env
+.DS_Store
+.turbo/
