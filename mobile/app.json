@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "Zanzibar BJJ",
+    "slug": "zanzibar-bjj",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./src/assets/logo-circle.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./src/assets/logo-circle.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1d1c18"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.chiefkeith777.zanzibarbjj"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./src/assets/logo-circle.png",
+        "backgroundColor": "#1d1c18"
+      },
+      "package": "com.chiefkeith777.zanzibarbjj"
+    }
+  }
+}
