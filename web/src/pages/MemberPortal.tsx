@@ -1,6 +1,8 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { dict, type Lang } from '../../../shared/content/translations'
-import { DEMO_MEMBER } from '../../../shared/content/data'
+import { useAuth } from '../lib/auth'
+import { getMember, getMemberPayments, getMemberAttendance, updateProfile } from '../lib/api'
+import type { Member, Payment, Attendance } from '../lib/database.types'
 import hero4 from '../assets/hero-4.jpg'
 
 interface MemberPortalProps {
@@ -8,27 +10,401 @@ interface MemberPortalProps {
   setPage: (p: string) => void
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function getBeltColor(belt: string): string {
+  const b = belt.toLowerCase()
+  if (b.includes('white'))  return '#e5e7eb'
+  if (b.includes('blue'))   return '#3b82f6'
+  if (b.includes('purple')) return '#9333ea'
+  if (b.includes('brown'))  return '#92400e'
+  if (b.includes('black'))  return '#111827'
+  return '#FCD116' // default gold
+}
+
+function beltStripePercent(_belt: string, stripes: number): number {
+  // Each belt has up to 4 stripes (5 = promotion), show progress within current belt
+  const normalised = Math.min(Math.max(stripes, 0), 4)
+  return Math.round((normalised / 4) * 100)
+}
+
+function statusColors(status: Member['status']): { bg: string; color: string } {
+  if (status === 'active')    return { bg: '#dcfce7', color: '#166534' }
+  if (status === 'due')       return { bg: '#fef3c7', color: '#92400e' }
+  if (status === 'overdue')   return { bg: '#fee2e2', color: '#991b1b' }
+  if (status === 'suspended') return { bg: '#f3f4f6', color: '#374151' }
+  return { bg: '#f4f1ea', color: '#8d897e' }
+}
+
+function daysUntil(dateStr: string | null): number {
+  if (!dateStr) return 0
+  const due  = new Date(dateStr)
+  const now  = new Date()
+  return Math.round((due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
+}
+
+function formatDate(dateStr: string | null): string {
+  if (!dateStr) return '—'
+  return new Date(dateStr).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+}
+
+// Group attendance records by ISO week within the current month
+function buildWeekBars(records: Attendance[]): { label: string; count: number; pct: number }[] {
+  const now   = new Date()
+  const year  = now.getFullYear()
+  const month = now.getMonth()
+
+  const weeks: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0 }
+
+  records.forEach((r) => {
+    const d = new Date(r.class_date)
+    if (d.getFullYear() === year && d.getMonth() === month) {
+      const day = d.getDate()
+      const wk  = Math.min(Math.ceil(day / 7), 4)
+      weeks[wk] = (weeks[wk] ?? 0) + 1
+    }
+  })
+
+  const max = Math.max(...Object.values(weeks), 1)
+  return [1, 2, 3, 4].map((wk) => ({
+    label: `W${wk}`,
+    count: weeks[wk],
+    pct: Math.round((weeks[wk] / max) * 100),
+  }))
+}
+
+function sessionsThisMonth(records: Attendance[]): number {
+  const now   = new Date()
+  const year  = now.getFullYear()
+  const month = now.getMonth()
+  return records.filter((r) => {
+    const d = new Date(r.class_date)
+    return d.getFullYear() === year && d.getMonth() === month
+  }).length
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
 export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
   const t = dict[lang]
-  const m = DEMO_MEMBER
+  const { user, profile, signOut, refreshProfile } = useAuth()
 
-  const [profileName, setProfileName] = useState(m.name)
-  const [profilePhone, setProfilePhone] = useState('+255 000 000 000')
+  const [member, setMember]       = useState<Member | null>(null)
+  const [payments, setPayments]   = useState<Payment[]>([])
+  const [attendance, setAttendance] = useState<Attendance[]>([])
+
+  const [loadingData, setLoadingData] = useState(true)
+  const [dataErr, setDataErr]         = useState<string | null>(null)
+  const [noMemberRow, setNoMemberRow] = useState(false)
+
+  // Profile edit state
+  const [profileName,  setProfileName]  = useState('')
+  const [profilePhone, setProfilePhone] = useState('')
   const [profileSaved, setProfileSaved] = useState(false)
+  const [saveErr,      setSaveErr]      = useState<string | null>(null)
+  const [saveBusy,     setSaveBusy]     = useState(false)
 
   const DARK  = '#1d1c18'
   const GOLD  = '#FCD116'
   const BLU   = '#00A3DD'
   const MUTED = '#8d897e'
 
-  const handleSave = (e: React.FormEvent) => {
-    e.preventDefault()
-    setProfileSaved(true)
-    setTimeout(() => setProfileSaved(false), 3000)
+  // ── Fetch data on mount ─────────────────────────────────────
+  useEffect(() => {
+    if (!user) return
+
+    async function load() {
+      setLoadingData(true)
+      setDataErr(null)
+
+      try {
+        const [memberRes, paymentsRes, attendanceRes] = await Promise.all([
+          getMember(user!.id),
+          getMemberPayments(user!.id),
+          getMemberAttendance(user!.id),
+        ])
+
+        if (memberRes.error) {
+          if (memberRes.error.code === 'PGRST116') {
+            // No row found — member profile not created yet
+            setNoMemberRow(true)
+          } else {
+            setDataErr(memberRes.error.message)
+          }
+        } else {
+          setMember(memberRes.data)
+        }
+
+        if (!paymentsRes.error)   setPayments(paymentsRes.data ?? [])
+        if (!attendanceRes.error) setAttendance(attendanceRes.data ?? [])
+      } catch (e: unknown) {
+        setDataErr(e instanceof Error ? e.message : 'Failed to load member data')
+      } finally {
+        setLoadingData(false)
+      }
+    }
+
+    load()
+  }, [user])
+
+  // Pre-fill profile edit form when profile loads
+  useEffect(() => {
+    if (profile) {
+      setProfileName(profile.name ?? '')
+      setProfilePhone(profile.phone ?? '')
+    }
+  }, [profile])
+
+  // ── Sign out ────────────────────────────────────────────────
+  const handleSignOut = async () => {
+    await signOut()
+    setPage('home')
   }
 
+  // ── Save profile ────────────────────────────────────────────
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!user) return
+    setSaveBusy(true)
+    setSaveErr(null)
+    setProfileSaved(false)
+
+    const { error } = await updateProfile(user.id, {
+      name:  profileName.trim() || null,
+      phone: profilePhone.trim() || null,
+    })
+
+    setSaveBusy(false)
+    if (error) {
+      setSaveErr(error.message)
+    } else {
+      await refreshProfile()
+      setProfileSaved(true)
+      setTimeout(() => setProfileSaved(false), 3000)
+    }
+  }
+
+  // ── Derived display values ───────────────────────────────────
+  const displayName   = profile?.name ?? user?.email ?? 'Member'
+  const initial       = displayName.trim().charAt(0).toUpperCase()
+  const belt          = member?.belt ?? 'White Belt'
+  const stripes       = member?.stripes ?? 0
+  const statusBadge   = statusColors(member?.status ?? 'active')
+  const daysLeft      = daysUntil(member?.due_date ?? null)
+  const beltPct       = beltStripePercent(belt, stripes)
+  const weekBars      = buildWeekBars(attendance)
+  const sessionsMonth = sessionsThisMonth(attendance)
+  const recentPayments = payments.slice(0, 5)
+
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    background: '#f9f8f5',
+    border: '1px solid #e6e2d8',
+    borderRadius: 4,
+    padding: '10px 13px',
+    fontFamily: 'Archivo, sans-serif',
+    fontSize: 14,
+    color: DARK,
+    outline: 'none',
+    boxSizing: 'border-box',
+  }
+
+  const labelStyle: React.CSSProperties = {
+    display: 'block',
+    fontFamily: 'Archivo, sans-serif',
+    fontWeight: 600,
+    fontSize: 11,
+    letterSpacing: '0.06em',
+    textTransform: 'uppercase',
+    color: MUTED,
+    marginBottom: 6,
+  }
+
+  // ── Loading skeleton ─────────────────────────────────────────
+  if (loadingData) {
+    return (
+      <div
+        style={{
+          background: '#f4f1ea',
+          minHeight: 'calc(100vh - 64px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexDirection: 'column',
+          gap: 16,
+        }}
+      >
+        <div
+          style={{
+            width: 48,
+            height: 48,
+            borderRadius: '50%',
+            border: `3px solid ${BLU}`,
+            borderTopColor: 'transparent',
+            animation: 'spin 0.8s linear infinite',
+          }}
+        />
+        <p style={{ color: MUTED, fontFamily: 'Archivo, sans-serif', fontSize: 13 }}>
+          Loading your portal…
+        </p>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    )
+  }
+
+  // ── Data error ───────────────────────────────────────────────
+  if (dataErr) {
+    return (
+      <div
+        style={{
+          background: '#f4f1ea',
+          minHeight: 'calc(100vh - 64px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: 40,
+        }}
+      >
+        <div
+          style={{
+            background: '#fff',
+            border: '1px solid #fca5a5',
+            borderRadius: 8,
+            padding: 32,
+            maxWidth: 440,
+            textAlign: 'center',
+          }}
+        >
+          <p style={{ color: '#dc2626', fontFamily: 'Archivo, sans-serif', fontSize: 14, marginBottom: 16 }}>
+            {dataErr}
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            style={{
+              background: DARK,
+              border: 'none',
+              cursor: 'pointer',
+              color: '#fff',
+              fontFamily: 'Archivo, sans-serif',
+              fontWeight: 700,
+              fontSize: 12,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              padding: '10px 20px',
+              borderRadius: 4,
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // ── No member row yet ─────────────────────────────────────────
+  if (noMemberRow) {
+    return (
+      <div
+        style={{
+          background: '#f4f1ea',
+          minHeight: 'calc(100vh - 64px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: 40,
+        }}
+      >
+        <div
+          style={{
+            background: '#fff',
+            border: '1px solid #e6e2d8',
+            borderRadius: 8,
+            padding: 40,
+            maxWidth: 480,
+            textAlign: 'center',
+          }}
+        >
+          <div
+            style={{
+              width: 56,
+              height: 56,
+              borderRadius: '50%',
+              background: GOLD,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto 20px',
+              fontFamily: 'Archivo, sans-serif',
+              fontWeight: 700,
+              fontSize: 22,
+              color: DARK,
+            }}
+          >
+            {initial}
+          </div>
+          <h2
+            style={{
+              fontFamily: 'Archivo, sans-serif',
+              fontWeight: 900,
+              fontSize: 20,
+              color: DARK,
+              textTransform: 'uppercase',
+              letterSpacing: '-0.01em',
+              margin: '0 0 12px 0',
+            }}
+          >
+            Complete Your Profile
+          </h2>
+          <p style={{ color: MUTED, fontSize: 14, lineHeight: 1.6, marginBottom: 24 }}>
+            Your account was created but your member record hasn't been set up yet.
+            Please contact admin to activate your membership.
+          </p>
+          <button
+            onClick={() => setPage('contact')}
+            style={{
+              background: BLU,
+              border: 'none',
+              cursor: 'pointer',
+              color: '#fff',
+              fontFamily: 'Archivo, sans-serif',
+              fontWeight: 700,
+              fontSize: 12,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              padding: '11px 24px',
+              borderRadius: 4,
+              marginRight: 10,
+            }}
+          >
+            Contact Admin
+          </button>
+          <button
+            onClick={handleSignOut}
+            style={{
+              background: 'transparent',
+              border: '1px solid #e6e2d8',
+              cursor: 'pointer',
+              color: MUTED,
+              fontFamily: 'Archivo, sans-serif',
+              fontWeight: 600,
+              fontSize: 12,
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+              padding: '11px 20px',
+              borderRadius: 4,
+            }}
+          >
+            Sign Out
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Main portal ───────────────────────────────────────────────
   return (
     <div style={{ background: '#f4f1ea', minHeight: 'calc(100vh - 64px)' }}>
+
       {/* Hero banner */}
       <div
         style={{
@@ -60,6 +436,7 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
             width: '100%',
           }}
         >
+          {/* Avatar */}
           <div
             style={{
               width: 64,
@@ -76,7 +453,7 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
               flexShrink: 0,
             }}
           >
-            {m.initial}
+            {initial}
           </div>
           <div>
             <p
@@ -103,14 +480,16 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
                 margin: '0 0 4px 0',
               }}
             >
-              {m.name}
+              {displayName}
             </h1>
             <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-              <span style={{ color: '#cfccc3', fontSize: 13 }}>{m.belt} · {m.stripes}</span>
+              <span style={{ color: '#cfccc3', fontSize: 13 }}>
+                {belt} · {stripes} stripe{stripes !== 1 ? 's' : ''}
+              </span>
               <span
                 style={{
-                  background: '#16a34a',
-                  color: '#fff',
+                  background: statusBadge.bg,
+                  color: statusBadge.color,
                   fontFamily: 'Archivo, sans-serif',
                   fontWeight: 700,
                   fontSize: 10,
@@ -120,11 +499,29 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
                   borderRadius: 999,
                 }}
               >
-                Active
+                {member?.status ?? 'active'}
               </span>
             </div>
           </div>
-          <div style={{ marginLeft: 'auto' }}>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+            <button
+              onClick={handleSignOut}
+              style={{
+                background: 'rgba(255,255,255,0.08)',
+                border: '1px solid rgba(255,255,255,0.15)',
+                cursor: 'pointer',
+                color: '#cfccc3',
+                fontFamily: 'Archivo, sans-serif',
+                fontWeight: 700,
+                fontSize: 11,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                padding: '8px 16px',
+                borderRadius: 4,
+              }}
+            >
+              Sign Out
+            </button>
             <button
               onClick={() => setPage('home')}
               style={{
@@ -147,7 +544,7 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
         </div>
       </div>
 
-      {/* Main content */}
+      {/* Main content grid */}
       <div
         style={{
           maxWidth: 1200,
@@ -158,7 +555,7 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
           gap: 24,
         }}
       >
-        {/* Payment card */}
+        {/* ── Payment card ──────────────────────────────────── */}
         <div
           style={{
             background: DARK,
@@ -191,11 +588,13 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
                   margin: '0 0 4px 0',
                 }}
               >
-                {m.fee} TZS
+                {member?.fee_amount?.toLocaleString() ?? '—'} TZS
               </p>
-              <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>{m.dueLine}</p>
+              <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+                Due {formatDate(member?.due_date ?? null)}
+              </p>
             </div>
-            {m.daysLeft <= 3 && (
+            {daysLeft >= 0 && daysLeft <= 3 && (
               <span
                 style={{
                   background: '#fef3c7',
@@ -209,15 +608,30 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
                   borderRadius: 4,
                 }}
               >
-                {m.daysLeft} days
+                {daysLeft} day{daysLeft !== 1 ? 's' : ''}
+              </span>
+            )}
+            {daysLeft < 0 && (
+              <span
+                style={{
+                  background: '#fee2e2',
+                  color: '#991b1b',
+                  fontFamily: 'Archivo, sans-serif',
+                  fontWeight: 700,
+                  fontSize: 10,
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                  padding: '4px 10px',
+                  borderRadius: 4,
+                }}
+              >
+                Overdue
               </span>
             )}
           </div>
           <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
             <a
-              href={m.payHref}
-              target="_blank"
-              rel="noopener noreferrer"
+              href="tel:+255"
               style={{
                 background: GOLD,
                 border: 'none',
@@ -237,6 +651,7 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
               {t.payNow}
             </a>
             <button
+              onClick={() => setPage('contact')}
               style={{
                 background: 'transparent',
                 border: '1px solid #3a382f',
@@ -257,7 +672,7 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
           <p style={{ color: '#55524a', fontSize: 11, marginTop: 12 }}>{t.payMethods}</p>
         </div>
 
-        {/* Membership details */}
+        {/* ── Membership details ─────────────────────────────── */}
         <div
           style={{
             background: '#fff',
@@ -279,7 +694,14 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
           >
             {t.membership}
           </h3>
-          {m.details.map((row) => (
+          {[
+            { k: 'Name',      v: profile?.name ?? '—' },
+            { k: 'Email',     v: profile?.email ?? '—' },
+            { k: 'Program',   v: profile?.program ?? '—' },
+            { k: 'Location',  v: profile?.location ?? '—' },
+            { k: 'Member since', v: formatDate(profile?.joined_date ?? null) },
+            { k: 'Status',    v: member?.status ?? '—' },
+          ].map((row) => (
             <div
               key={row.k}
               style={{
@@ -302,10 +724,9 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
               </span>
             </div>
           ))}
-          <p style={{ color: MUTED, fontSize: 12, marginTop: 12 }}>{m.gymPerk}</p>
         </div>
 
-        {/* Attendance chart */}
+        {/* ── Attendance chart ───────────────────────────────── */}
         <div
           style={{
             background: '#fff',
@@ -336,15 +757,15 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
                 color: BLU,
               }}
             >
-              {m.sessionsMonth}
+              {sessionsMonth}
             </span>
           </div>
           <p style={{ color: MUTED, fontSize: 12, marginBottom: 16 }}>
-            {m.sessionsMonth} {t.thisMonth}
+            {sessionsMonth} {t.thisMonth}
           </p>
           {/* Bar chart */}
           <div style={{ display: 'flex', gap: 6, alignItems: 'flex-end', height: 80 }}>
-            {m.weeks.map((w) => (
+            {weekBars.map((w) => (
               <div key={w.label} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
                 <div style={{ width: '100%', position: 'relative', height: 60 }}>
                   <div
@@ -352,10 +773,10 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
                       position: 'absolute',
                       bottom: 0,
                       width: '100%',
-                      height: `${w.pct}%`,
-                      background: BLU,
+                      height: `${Math.max(w.pct, 4)}%`,
+                      background: w.pct > 0 ? BLU : '#e6e2d8',
                       borderRadius: '2px 2px 0 0',
-                      opacity: 0.8,
+                      opacity: 0.85,
                     }}
                   />
                 </div>
@@ -363,12 +784,14 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
               </div>
             ))}
           </div>
-          <p style={{ color: MUTED, fontSize: 11, marginTop: 10, fontStyle: 'italic' }}>
-            {m.attendanceNote}
-          </p>
+          {attendance.length === 0 && (
+            <p style={{ color: MUTED, fontSize: 11, marginTop: 10, fontStyle: 'italic' }}>
+              No attendance records yet — check in at class to start tracking.
+            </p>
+          )}
         </div>
 
-        {/* Belt progress */}
+        {/* ── Belt progress ──────────────────────────────────── */}
         <div
           style={{
             background: '#fff',
@@ -392,27 +815,146 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
           </h3>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
             <span style={{ fontFamily: 'Archivo, sans-serif', fontWeight: 600, fontSize: 16, color: DARK }}>
-              {m.belt}
+              {belt}
             </span>
-            <span style={{ color: MUTED, fontSize: 13 }}>{m.stripes}</span>
+            <span style={{ color: MUTED, fontSize: 13 }}>
+              {stripes} / 4 stripe{stripes !== 1 ? 's' : ''}
+            </span>
           </div>
-          <div style={{ background: '#f4f1ea', borderRadius: 999, height: 10, overflow: 'hidden' }}>
+          {/* Belt colour swatch */}
+          <div
+            style={{
+              background: '#f4f1ea',
+              borderRadius: 999,
+              height: 12,
+              overflow: 'hidden',
+              marginBottom: 8,
+            }}
+          >
             <div
               style={{
-                width: `${m.beltPct}%`,
+                width: `${beltPct}%`,
                 height: '100%',
-                background: GOLD,
+                background: getBeltColor(belt),
                 borderRadius: 999,
-                transition: 'width 0.5s ease',
+                transition: 'width 0.6s ease',
+                minWidth: beltPct > 0 ? 12 : 0,
               }}
             />
           </div>
-          <p style={{ color: MUTED, fontSize: 11, marginTop: 10, fontStyle: 'italic' }}>
-            {m.beltNote}
+          {/* Stripe dots */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+            {[1, 2, 3, 4].map((i) => (
+              <div
+                key={i}
+                style={{
+                  width: 18,
+                  height: 18,
+                  borderRadius: '50%',
+                  background: i <= stripes ? GOLD : '#e6e2d8',
+                  border: `2px solid ${i <= stripes ? GOLD : '#d4d0c8'}`,
+                  transition: 'all 0.2s',
+                }}
+              />
+            ))}
+          </div>
+          <p style={{ color: MUTED, fontSize: 11, marginTop: 4, fontStyle: 'italic' }}>
+            Belt promotions are awarded by Chief Keith based on technical skill and mat time.
           </p>
         </div>
 
-        {/* Upcoming classes */}
+        {/* ── Payment history ────────────────────────────────── */}
+        <div
+          style={{
+            background: '#fff',
+            borderRadius: 8,
+            padding: 24,
+            border: '1px solid #e6e2d8',
+          }}
+        >
+          <h3
+            style={{
+              fontFamily: 'Archivo, sans-serif',
+              fontWeight: 700,
+              fontSize: 14,
+              color: DARK,
+              textTransform: 'uppercase',
+              letterSpacing: '0.06em',
+              margin: '0 0 16px 0',
+            }}
+          >
+            {t.history}
+          </h3>
+          {recentPayments.length === 0 ? (
+            <p style={{ color: MUTED, fontSize: 13 }}>No payment history yet.</p>
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  {[t.hDate, t.hAmount, t.hMethod, t.hStatus].map((h) => (
+                    <th
+                      key={h}
+                      style={{
+                        fontFamily: 'Archivo, sans-serif',
+                        fontWeight: 700,
+                        fontSize: 10,
+                        letterSpacing: '0.08em',
+                        textTransform: 'uppercase',
+                        color: MUTED,
+                        textAlign: 'left',
+                        padding: '0 0 10px 0',
+                        borderBottom: '1px solid #f4f1ea',
+                      }}
+                    >
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {recentPayments.map((row) => {
+                  const paidColors = row.status === 'paid'
+                    ? { bg: '#dcfce7', color: '#166534' }
+                    : row.status === 'pending'
+                    ? { bg: '#fef3c7', color: '#92400e' }
+                    : { bg: '#fee2e2', color: '#991b1b' }
+                  return (
+                    <tr key={row.id}>
+                      <td style={{ padding: '9px 0', borderBottom: '1px solid #f4f1ea', fontFamily: 'Archivo, sans-serif', fontSize: 13, color: DARK }}>
+                        {formatDate(row.paid_date)}
+                      </td>
+                      <td style={{ padding: '9px 0', borderBottom: '1px solid #f4f1ea', fontFamily: 'Archivo, sans-serif', fontSize: 13, color: DARK }}>
+                        {row.amount.toLocaleString()} TZS
+                      </td>
+                      <td style={{ padding: '9px 0', borderBottom: '1px solid #f4f1ea', fontFamily: 'Archivo, sans-serif', fontSize: 13, color: DARK }}>
+                        {row.method ?? '—'}
+                      </td>
+                      <td style={{ padding: '9px 0', borderBottom: '1px solid #f4f1ea' }}>
+                        <span
+                          style={{
+                            background: paidColors.bg,
+                            color: paidColors.color,
+                            fontFamily: 'Archivo, sans-serif',
+                            fontWeight: 600,
+                            fontSize: 10,
+                            letterSpacing: '0.06em',
+                            textTransform: 'uppercase',
+                            padding: '2px 7px',
+                            borderRadius: 3,
+                          }}
+                        >
+                          {row.status}
+                        </span>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* ── Upcoming classes (static schedule) ───────────────── */}
         <div
           style={{
             background: '#fff',
@@ -434,7 +976,12 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
           >
             {t.upcoming}
           </h3>
-          {m.upcoming.map((cls, i) => (
+          {[
+            { day: 'Monday',    time: '18:00', what: 'Fundamentals — No-Gi' },
+            { day: 'Wednesday', time: '18:00', what: 'BJJ / Gi' },
+            { day: 'Friday',    time: '18:00', what: 'Open Mat' },
+            { day: 'Saturday',  time: '09:00', what: 'Kids BJJ' },
+          ].map((cls, i, arr) => (
             <div
               key={i}
               style={{
@@ -442,7 +989,7 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
                 gap: 14,
                 alignItems: 'center',
                 padding: '10px 0',
-                borderBottom: i < m.upcoming.length - 1 ? '1px solid #f4f1ea' : 'none',
+                borderBottom: i < arr.length - 1 ? '1px solid #f4f1ea' : 'none',
               }}
             >
               <div
@@ -453,7 +1000,7 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
                   padding: '8px 12px',
                   textAlign: 'center',
                   flexShrink: 0,
-                  minWidth: 48,
+                  minWidth: 52,
                 }}
               >
                 <div
@@ -484,97 +1031,7 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
           ))}
         </div>
 
-        {/* Payment history */}
-        <div
-          style={{
-            background: '#fff',
-            borderRadius: 8,
-            padding: 24,
-            border: '1px solid #e6e2d8',
-          }}
-        >
-          <h3
-            style={{
-              fontFamily: 'Archivo, sans-serif',
-              fontWeight: 700,
-              fontSize: 14,
-              color: DARK,
-              textTransform: 'uppercase',
-              letterSpacing: '0.06em',
-              margin: '0 0 16px 0',
-            }}
-          >
-            {t.history}
-          </h3>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr>
-                {[t.hDate, t.hAmount, t.hMethod, t.hStatus].map((h) => (
-                  <th
-                    key={h}
-                    style={{
-                      fontFamily: 'Archivo, sans-serif',
-                      fontWeight: 700,
-                      fontSize: 10,
-                      letterSpacing: '0.08em',
-                      textTransform: 'uppercase',
-                      color: MUTED,
-                      textAlign: 'left',
-                      padding: '0 0 10px 0',
-                      borderBottom: '1px solid #f4f1ea',
-                    }}
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {m.history.map((row, i) => (
-                <tr key={i}>
-                  {[row.date, `${row.amount} TZS`, row.method].map((cell, j) => (
-                    <td
-                      key={j}
-                      style={{
-                        padding: '9px 0',
-                        borderBottom: '1px solid #f4f1ea',
-                        fontFamily: 'Archivo, sans-serif',
-                        fontSize: 13,
-                        color: DARK,
-                      }}
-                    >
-                      {cell}
-                    </td>
-                  ))}
-                  <td
-                    style={{
-                      padding: '9px 0',
-                      borderBottom: '1px solid #f4f1ea',
-                    }}
-                  >
-                    <span
-                      style={{
-                        background: '#dcfce7',
-                        color: '#166534',
-                        fontFamily: 'Archivo, sans-serif',
-                        fontWeight: 600,
-                        fontSize: 10,
-                        letterSpacing: '0.06em',
-                        textTransform: 'uppercase',
-                        padding: '2px 7px',
-                        borderRadius: 3,
-                      }}
-                    >
-                      {row.status}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Profile edit */}
+        {/* ── Profile edit (full width) ─────────────────────── */}
         <div
           style={{
             background: '#fff',
@@ -607,77 +1064,38 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
               }}
             >
               <div>
-                <label
-                  style={{
-                    display: 'block',
-                    fontFamily: 'Archivo, sans-serif',
-                    fontWeight: 600,
-                    fontSize: 11,
-                    letterSpacing: '0.06em',
-                    textTransform: 'uppercase',
-                    color: MUTED,
-                    marginBottom: 6,
-                  }}
-                >
-                  {t.fName}
-                </label>
+                <label style={labelStyle}>{t.fName}</label>
                 <input
                   type="text"
                   value={profileName}
                   onChange={(e) => setProfileName(e.target.value)}
-                  style={{
-                    width: '100%',
-                    background: '#f9f8f5',
-                    border: '1px solid #e6e2d8',
-                    borderRadius: 4,
-                    padding: '10px 13px',
-                    fontFamily: 'Archivo, sans-serif',
-                    fontSize: 14,
-                    color: DARK,
-                    outline: 'none',
-                  }}
+                  style={inputStyle}
                 />
               </div>
               <div>
-                <label
-                  style={{
-                    display: 'block',
-                    fontFamily: 'Archivo, sans-serif',
-                    fontWeight: 600,
-                    fontSize: 11,
-                    letterSpacing: '0.06em',
-                    textTransform: 'uppercase',
-                    color: MUTED,
-                    marginBottom: 6,
-                  }}
-                >
-                  {t.fPhone}
-                </label>
+                <label style={labelStyle}>{t.fPhone}</label>
                 <input
                   type="tel"
                   value={profilePhone}
                   onChange={(e) => setProfilePhone(e.target.value)}
-                  style={{
-                    width: '100%',
-                    background: '#f9f8f5',
-                    border: '1px solid #e6e2d8',
-                    borderRadius: 4,
-                    padding: '10px 13px',
-                    fontFamily: 'Archivo, sans-serif',
-                    fontSize: 14,
-                    color: DARK,
-                    outline: 'none',
-                  }}
+                  placeholder="+255 000 000 000"
+                  style={inputStyle}
                 />
               </div>
             </div>
+            {saveErr && (
+              <p style={{ color: '#dc2626', fontSize: 13, marginBottom: 12, fontFamily: 'Archivo, sans-serif' }}>
+                {saveErr}
+              </p>
+            )}
             <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
               <button
                 type="submit"
+                disabled={saveBusy}
                 style={{
-                  background: DARK,
+                  background: saveBusy ? '#8d897e' : DARK,
                   border: 'none',
-                  cursor: 'pointer',
+                  cursor: saveBusy ? 'not-allowed' : 'pointer',
                   color: '#fff',
                   fontFamily: 'Archivo, sans-serif',
                   fontWeight: 700,
@@ -686,9 +1104,10 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
                   textTransform: 'uppercase',
                   padding: '11px 22px',
                   borderRadius: 4,
+                  transition: 'background 0.15s',
                 }}
               >
-                {t.saveChanges}
+                {saveBusy ? 'Saving…' : t.saveChanges}
               </button>
               {profileSaved && (
                 <span style={{ color: '#16a34a', fontSize: 13, fontFamily: 'Archivo, sans-serif' }}>
