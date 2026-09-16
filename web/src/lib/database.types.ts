@@ -6,7 +6,7 @@ export interface Database {
       profiles: {
         Row: {
           id: string; email: string; name: string | null; phone: string | null
-          role: 'member' | 'coach' | 'admin'; location: string | null
+          role: 'pending' | 'member' | 'coach' | 'admin'; location: string | null
           program: string | null; emergency: string | null
           joined_date: string | null; created_at: string
         }

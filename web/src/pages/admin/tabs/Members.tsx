@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { getAllProfiles, markMemberPaid, upsertMember } from '../../../lib/api'
+import { getAllProfiles, markMemberPaid, upsertMember, approveMember } from '../../../lib/api'
 import { supabase } from '../../../lib/supabase'
 import { useAuth } from '../../../lib/auth'
 
@@ -18,7 +18,7 @@ const LOCATIONS = ['Stone Town', 'Kiwengwa', 'Jambiani', 'Fumba Town']
 const PROGRAMS = ['Adults BJJ', 'Kids BJJ', 'Competition', 'Beach BJJ']
 const BELTS = ['White', 'Blue', 'Purple', 'Brown', 'Black']
 
-type StatusFilter = 'all' | 'active' | 'due' | 'overdue' | 'suspended'
+type StatusFilter = 'all' | 'active' | 'due' | 'overdue' | 'suspended' | 'pending'
 
 const STATUS_STYLE: Record<string, { bg: string; color: string }> = {
   active:    { bg: '#e8f6ee', color: '#1f8a5b' },
@@ -114,12 +114,15 @@ export default function Members({ location }: Props) {
   useEffect(() => { load() }, [load])
 
   // Filter members
+  const pending = profiles.filter(p => p.role === 'pending')
   const members = profiles.filter(p => p.role === 'member')
   const locFiltered = location === 'all' ? members : members.filter(p => p.location === location)
   const searched = search.trim()
     ? locFiltered.filter(p => (p.name ?? '').toLowerCase().includes(search.toLowerCase()) || (p.phone ?? '').includes(search))
     : locFiltered
-  const statusFiltered = statusFilter === 'all' ? searched : searched.filter(p => p.members?.status === statusFilter)
+  const statusFiltered = statusFilter === 'pending'
+    ? pending
+    : statusFilter === 'all' ? searched : searched.filter(p => p.members?.status === statusFilter)
 
   const counts = {
     all: locFiltered.length,
@@ -127,12 +130,20 @@ export default function Members({ location }: Props) {
     due: locFiltered.filter(p => p.members?.status === 'due').length,
     overdue: locFiltered.filter(p => p.members?.status === 'overdue').length,
     suspended: locFiltered.filter(p => p.members?.status === 'suspended').length,
+    pending: pending.length,
   }
 
   async function handleMarkPaid(profileId: string, feeAmount: number) {
     const { error: e } = await markMemberPaid(profileId, feeAmount, 'cash')
     if (e) { showToast('Failed to mark paid', false); return }
     showToast('Marked as paid')
+    load()
+  }
+
+  async function handleApprove(profileId: string) {
+    const { error: e } = await approveMember(profileId)
+    if (e) { showToast('Approval failed', false); return }
+    showToast('Member approved and activated')
     load()
   }
 
@@ -214,6 +225,7 @@ export default function Members({ location }: Props) {
           </h2>
           <p style={{ margin: '4px 0 0', fontFamily: 'Archivo, sans-serif', fontSize: 13, color: BRAND.muted }}>
             {counts.all} members · {counts.active} active · {counts.due} due · {counts.overdue} overdue
+            {counts.pending > 0 && <span style={{ color: '#e08a1e', fontWeight: 700 }}> · {counts.pending} pending approval</span>}
           </p>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
@@ -248,7 +260,7 @@ export default function Members({ location }: Props) {
           onChange={e => setSearch(e.target.value)}
           style={{ padding: '9px 14px', borderRadius: 7, border: `1.5px solid ${BRAND.border}`, background: '#fff', fontFamily: 'Archivo, sans-serif', fontSize: 13, width: 240, outline: 'none', color: BRAND.dark }}
         />
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {(['all', 'active', 'due', 'overdue', 'suspended'] as StatusFilter[]).map(s => (
             <button
               key={s}
@@ -264,6 +276,17 @@ export default function Members({ location }: Props) {
               {s} {s !== 'all' && `(${counts[s]})`}
             </button>
           ))}
+          <button
+            onClick={() => setStatusFilter('pending')}
+            style={{
+              padding: '6px 14px', borderRadius: 20, border: 'none', cursor: 'pointer',
+              fontFamily: 'Archivo, sans-serif', fontSize: 12, fontWeight: 700,
+              background: statusFilter === 'pending' ? '#e08a1e' : '#fdf6d8',
+              color: statusFilter === 'pending' ? '#fff' : '#a3820e',
+            }}
+          >
+            Pending ({counts.pending})
+          </button>
         </div>
       </div>
 
@@ -297,8 +320,10 @@ export default function Members({ location }: Props) {
             <tbody>
               {statusFiltered.map(p => {
                 const m = p.members
-                const st = m?.status ?? 'active'
-                const pill = STATUS_STYLE[st] ?? STATUS_STYLE.active
+                const st = p.role === 'pending' ? 'pending' : (m?.status ?? 'active')
+                const pill = st === 'pending'
+                  ? { bg: '#fdf6d8', color: '#a3820e' }
+                  : (STATUS_STYLE[st] ?? STATUS_STYLE.active)
                 const isExpanded = expandedId === p.id
 
                 return (
@@ -324,21 +349,39 @@ export default function Members({ location }: Props) {
                         </span>
                       </td>
                       <td style={{ padding: '13px 14px' }} onClick={e => e.stopPropagation()}>
-                        <div style={{ display: 'flex', gap: 6 }}>
-                          <a
-                            href={`https://wa.me/${(p.phone ?? '').replace(/\D/g, '')}?text=Hi+${encodeURIComponent(p.name ?? '')}%2C+your+Zanzibar+BJJ+payment+is+due.`}
-                            target="_blank" rel="noreferrer"
-                            style={{ padding: '5px 10px', borderRadius: 5, background: '#25D366', color: '#fff', fontSize: 11, fontFamily: 'Archivo, sans-serif', fontWeight: 700, textDecoration: 'none', cursor: 'pointer' }}
-                          >
-                            Remind
-                          </a>
-                          <button
-                            onClick={() => handleMarkPaid(p.id, m?.fee_amount ?? 0)}
-                            style={{ padding: '5px 10px', borderRadius: 5, background: BRAND.blue, color: '#fff', fontSize: 11, fontFamily: 'Archivo, sans-serif', fontWeight: 700, border: 'none', cursor: 'pointer' }}
-                          >
-                            Mark paid
-                          </button>
-                        </div>
+                        {p.role === 'pending' ? (
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button
+                              onClick={() => handleApprove(p.id)}
+                              style={{ padding: '5px 12px', borderRadius: 5, background: '#1f8a5b', color: '#fff', fontSize: 11, fontFamily: 'Archivo, sans-serif', fontWeight: 700, border: 'none', cursor: 'pointer' }}
+                            >
+                              ✓ Approve
+                            </button>
+                            <a
+                              href={`https://wa.me/${(p.phone ?? '').replace(/\D/g, '')}?text=Hi+${encodeURIComponent(p.name ?? '')}%2C+please+complete+your+first+payment+to+activate+your+Zanzibar+BJJ+membership.`}
+                              target="_blank" rel="noreferrer"
+                              style={{ padding: '5px 10px', borderRadius: 5, background: '#25D366', color: '#fff', fontSize: 11, fontFamily: 'Archivo, sans-serif', fontWeight: 700, textDecoration: 'none', cursor: 'pointer' }}
+                            >
+                              WhatsApp
+                            </a>
+                          </div>
+                        ) : (
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <a
+                              href={`https://wa.me/${(p.phone ?? '').replace(/\D/g, '')}?text=Hi+${encodeURIComponent(p.name ?? '')}%2C+your+Zanzibar+BJJ+payment+is+due.`}
+                              target="_blank" rel="noreferrer"
+                              style={{ padding: '5px 10px', borderRadius: 5, background: '#25D366', color: '#fff', fontSize: 11, fontFamily: 'Archivo, sans-serif', fontWeight: 700, textDecoration: 'none', cursor: 'pointer' }}
+                            >
+                              Remind
+                            </a>
+                            <button
+                              onClick={() => handleMarkPaid(p.id, m?.fee_amount ?? 0)}
+                              style={{ padding: '5px 10px', borderRadius: 5, background: BRAND.blue, color: '#fff', fontSize: 11, fontFamily: 'Archivo, sans-serif', fontWeight: 700, border: 'none', cursor: 'pointer' }}
+                            >
+                              Mark paid
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                     {isExpanded && (

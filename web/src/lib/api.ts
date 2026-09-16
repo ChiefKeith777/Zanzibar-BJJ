@@ -21,6 +21,23 @@ export async function updateProfileRole(id: string, role: Profile['role']) {
   return supabase.from('profiles').update({ role }).eq('id', id)
 }
 
+export async function approveMember(id: string, feeAmount = 30000) {
+  await supabase.from('profiles').update({ role: 'member' }).eq('id', id)
+  return supabase.from('members').upsert({
+    id,
+    fee_amount: feeAmount,
+    status: 'active',
+    due_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+    belt: 'White Belt',
+    stripes: 0,
+    sessions_this_month: 0,
+  })
+}
+
+export async function getPendingMembers() {
+  return supabase.from('profiles').select('*').eq('role', 'pending').order('created_at', { ascending: false })
+}
+
 // ── Members ─────────────────────────────────────────────────
 export async function getMember(id: string) {
   return supabase.from('members').select('*').eq('id', id).single()

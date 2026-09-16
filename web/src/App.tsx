@@ -10,12 +10,13 @@ import Learn from './pages/Learn'
 import Coach from './pages/Coach'
 import Contact from './pages/Contact'
 import AdminDashboard from './pages/admin/AdminDashboard'
+import PendingApproval from './pages/PendingApproval'
 import logoCircle from './assets/logo-circle.png'
 
 export type Lang = 'en' | 'sw'
-export type Page = 'home' | 'login' | 'member' | 'about' | 'learn' | 'coach' | 'contact' | 'admin' | 'auth-callback'
+export type Page = 'home' | 'login' | 'member' | 'about' | 'learn' | 'coach' | 'contact' | 'admin' | 'auth-callback' | 'pending'
 
-const VALID_PAGES: Page[] = ['home', 'login', 'member', 'about', 'learn', 'coach', 'contact', 'admin', 'auth-callback']
+const VALID_PAGES: Page[] = ['home', 'login', 'member', 'about', 'learn', 'coach', 'contact', 'admin', 'auth-callback', 'pending']
 
 export default function App() {
   const { user, profile, loading } = useAuth()
@@ -41,6 +42,7 @@ export default function App() {
         const role = profile.role
         if (role === 'admin') setPageRaw('admin')
         else if (role === 'coach') setPageRaw('coach')
+        else if (role === 'pending') setPageRaw('pending' as Page)
         else setPageRaw('member')
       }
     }
@@ -106,6 +108,11 @@ export default function App() {
   // Admin gets their own full-screen dashboard (no shared header/footer)
   if (page === 'admin' || (user && profile?.role === 'admin' && (page === 'member' || page === 'coach'))) {
     return <AdminDashboard lang={lang} setPage={setPage} />
+  }
+
+  // Pending users see approval holding screen (no header/footer)
+  if (page === 'pending' || (user && profile?.role === 'pending')) {
+    return <PendingApproval setPage={setPage} />
   }
 
   const props = { lang, setPage }
