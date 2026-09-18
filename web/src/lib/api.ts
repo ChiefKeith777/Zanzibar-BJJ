@@ -3,6 +3,7 @@ import type {
   Profile, Member, Curriculum,
   Schedule, Booking, AlertRule,
 } from './database.types'
+import { computeOverview } from './utils'
 
 // ── Profiles ────────────────────────────────────────────────
 export async function getProfile(id: string) {
@@ -206,18 +207,5 @@ export async function getAdminOverview(location?: string) {
     membersQ,
   ])
 
-  const memberProfiles = (profiles ?? []).filter(p => p.role === 'member')
-  const filtered = location && location !== 'all'
-    ? memberProfiles.filter(p => p.location === location)
-    : memberProfiles
-
-  const ids = new Set(filtered.map(p => p.id))
-  const filteredMembers = (members ?? []).filter(m => ids.has(m.id))
-
-  const active   = filteredMembers.filter(m => m.status === 'active').length
-  const due      = filteredMembers.filter(m => m.status === 'due').length
-  const overdue  = filteredMembers.filter(m => m.status === 'overdue').length
-  const revenue  = filteredMembers.filter(m => m.status === 'active').reduce((s, m) => s + m.fee_amount, 0)
-
-  return { total: filteredMembers.length, active, due, overdue, revenue }
+  return computeOverview(profiles ?? [], members ?? [], location)
 }

@@ -1,6 +1,7 @@
 // Header component
 import { dict, type Lang } from '../../../shared/content/translations'
 import { useAuth } from '../lib/auth'
+import { getInitial, roleToPortal } from '../lib/utils'
 import logoCircle from '../assets/logo-circle.png'
 
 interface HeaderProps {
@@ -33,15 +34,7 @@ export default function Header({ lang, setLang, setPage, isLoggedIn = false, use
 
   // Determine which portal page to navigate to
   const handleAccountClick = () => {
-    if (userRole === 'admin') setPage('admin')
-    else if (userRole === 'coach') setPage('coach')
-    else setPage('member')
-  }
-
-  // Get initials from profile name
-  const getInitial = () => {
-    const name = profile?.name ?? ''
-    return name.trim().charAt(0).toUpperCase() || '?'
+    setPage(roleToPortal(userRole))
   }
 
   return (
@@ -218,7 +211,7 @@ export default function Header({ lang, setLang, setPage, isLoggedIn = false, use
                 flexShrink: 0,
               }}
             >
-              {getInitial()}
+              {getInitial(profile?.name)}
             </div>
             {/* Admin badge */}
             {userRole === 'admin' && (

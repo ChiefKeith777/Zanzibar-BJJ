@@ -1,6 +1,7 @@
 import React, { useState } from 'react' // React needed for FormEvent type
 import { dict, type Lang } from '../../../shared/content/translations'
 import { VENUES, WA_HREF } from '../../../shared/content/data'
+import { isKidsProgram } from '../lib/utils'
 
 interface ContactProps {
   lang: Lang
@@ -26,8 +27,7 @@ export default function Contact({ lang }: ContactProps) {
   const GOLD  = '#FCD116'
   const MUTED = '#8d897e'
 
-  const isKids = ['Little Champs (4–7)', t.progK47, t.progK812, t.progT1316].includes(program)
-    || program === t.progK47 || program === t.progK812 || program === t.progT1316
+  const isKids = isKidsProgram(program)
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()

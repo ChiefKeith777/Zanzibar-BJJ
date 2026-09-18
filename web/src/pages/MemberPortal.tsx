@@ -3,84 +3,20 @@ import { dict, type Lang } from '../../../shared/content/translations'
 import { useAuth } from '../lib/auth'
 import { getMember, getMemberPayments, getMemberAttendance, updateProfile } from '../lib/api'
 import type { Member, Payment, Attendance } from '../lib/database.types'
+import {
+  getBeltColor,
+  beltStripePercent,
+  statusColors,
+  daysUntil,
+  formatDate,
+  buildWeekBars,
+  sessionsThisMonth,
+} from '../lib/utils'
 import hero4 from '../assets/hero-4.jpg'
 
 interface MemberPortalProps {
   lang: Lang
   setPage: (p: string) => void
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function getBeltColor(belt: string): string {
-  const b = belt.toLowerCase()
-  if (b.includes('white'))  return '#e5e7eb'
-  if (b.includes('blue'))   return '#3b82f6'
-  if (b.includes('purple')) return '#9333ea'
-  if (b.includes('brown'))  return '#92400e'
-  if (b.includes('black'))  return '#111827'
-  return '#FCD116' // default gold
-}
-
-function beltStripePercent(_belt: string, stripes: number): number {
-  // Each belt has up to 4 stripes (5 = promotion), show progress within current belt
-  const normalised = Math.min(Math.max(stripes, 0), 4)
-  return Math.round((normalised / 4) * 100)
-}
-
-function statusColors(status: Member['status']): { bg: string; color: string } {
-  if (status === 'active')    return { bg: '#dcfce7', color: '#166534' }
-  if (status === 'due')       return { bg: '#fef3c7', color: '#92400e' }
-  if (status === 'overdue')   return { bg: '#fee2e2', color: '#991b1b' }
-  if (status === 'suspended') return { bg: '#f3f4f6', color: '#374151' }
-  return { bg: '#f4f1ea', color: '#8d897e' }
-}
-
-function daysUntil(dateStr: string | null): number {
-  if (!dateStr) return 0
-  const due  = new Date(dateStr)
-  const now  = new Date()
-  return Math.round((due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
-}
-
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return '—'
-  return new Date(dateStr).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-}
-
-// Group attendance records by ISO week within the current month
-function buildWeekBars(records: Attendance[]): { label: string; count: number; pct: number }[] {
-  const now   = new Date()
-  const year  = now.getFullYear()
-  const month = now.getMonth()
-
-  const weeks: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0 }
-
-  records.forEach((r) => {
-    const d = new Date(r.class_date)
-    if (d.getFullYear() === year && d.getMonth() === month) {
-      const day = d.getDate()
-      const wk  = Math.min(Math.ceil(day / 7), 4)
-      weeks[wk] = (weeks[wk] ?? 0) + 1
-    }
-  })
-
-  const max = Math.max(...Object.values(weeks), 1)
-  return [1, 2, 3, 4].map((wk) => ({
-    label: `W${wk}`,
-    count: weeks[wk],
-    pct: Math.round((weeks[wk] / max) * 100),
-  }))
-}
-
-function sessionsThisMonth(records: Attendance[]): number {
-  const now   = new Date()
-  const year  = now.getFullYear()
-  const month = now.getMonth()
-  return records.filter((r) => {
-    const d = new Date(r.class_date)
-    return d.getFullYear() === year && d.getMonth() === month
-  }).length
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -191,7 +127,7 @@ export default function MemberPortal({ lang, setPage }: MemberPortalProps) {
   const stripes       = member?.stripes ?? 0
   const statusBadge   = statusColors(member?.status ?? 'active')
   const daysLeft      = daysUntil(member?.due_date ?? null)
-  const beltPct       = beltStripePercent(belt, stripes)
+  const beltPct       = beltStripePercent(stripes)
   const weekBars      = buildWeekBars(attendance)
   const sessionsMonth = sessionsThisMonth(attendance)
   const recentPayments = payments.slice(0, 5)
